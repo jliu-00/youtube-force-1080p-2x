@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         YouTube Force 1080p & 2x
 // @namespace    http://tampermonkey.net/
-// @version      1.0
-// @description  Force YouTube playback speed to 2x and video quality to 1080p
+// @version      1.1
+// @description  Force YouTube playback speed and video quality
 // @author       jliu-00
 // @match        *://www.youtube.com/*
+// @match        *://m.youtube.com/*
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
@@ -26,29 +27,42 @@
     // ==========================================
 
     let lastProcessedVideoId = null;
+    let lastQualityVideoId = null;
+    let speedSyncInterval = null;
 
-    // 1. Attempt to inject into LocalStorage early to lock the quality upper limit
-    function lockQualityStorage() {
+    // Helper: Map API quality code to UI label text
+    const getQualityLabel = (qualityCode) => {
+        const map = {
+            'highres': '4320p',
+            'hd2160': '2160p',
+            'hd1440': '1440p',
+            'hd1080': '1080p',
+            'hd720': '720p',
+            'large': '480p',
+            'medium': '360p',
+            'small': '240p',
+            'tiny': '144p'
+        };
+        return map[qualityCode] || '1080p';
+    };
+
+    // 1. Inject local storage settings
+    function lockSettingsStorage() {
         try {
-            window.localStorage.setItem('yt-player-quality', JSON.stringify({
-                data: CONFIG.TARGET_QUALITY, expiration: Date.now() + 31536000000, creation: Date.now()
-            }));
+            const qualityConfig = JSON.stringify({ data: CONFIG.TARGET_QUALITY, expiration: Date.now() + 31536000000, creation: Date.now() });
+            window.localStorage.setItem('yt-player-quality', qualityConfig);
+            window.localStorage.setItem('yt-player-playback-rate', JSON.stringify({data: CONFIG.TARGET_SPEED, creation: Date.now()}));
         } catch (e) {}
     }
 
-    // 2. Core logic: Simulate human pressing the native speed-up shortcut (Shift + >)
-    function syncSpeed() {
-        const video = document.querySelector('video');
-        if (!video || video.playbackRate >= CONFIG.TARGET_SPEED) return;
-
+    // 2. Sync playback speed based on config
+    function syncSpeed(video) {
+        if (!video || speedSyncInterval) return;
         let attempts = 0;
-        // Press the speed-up key every 100ms until reaching target speed
-        const speedUpInterval = setInterval(() => {
-            if (video.playbackRate >= CONFIG.TARGET_SPEED || attempts > 10) {
-                clearInterval(speedUpInterval);
-
-                // Fallback: If the browser blocks simulated key presses, force it via underlying API
-                // and manually dispatch an update event to wake up the UI
+        speedSyncInterval = setInterval(() => {
+            if (video.playbackRate >= CONFIG.TARGET_SPEED || attempts > 20) {
+                clearInterval(speedSyncInterval);
+                speedSyncInterval = null;
                 if (video.playbackRate < CONFIG.TARGET_SPEED) {
                     const player = document.getElementById('movie_player');
                     if (player && typeof player.setPlaybackRate === 'function') {
@@ -56,63 +70,148 @@
                     } else {
                         video.playbackRate = CONFIG.TARGET_SPEED;
                     }
-                    video.dispatchEvent(new Event('ratechange', {bubbles: true}));
                 }
                 return;
             }
-
-            // Dispatch native shortcut event
             document.dispatchEvent(new KeyboardEvent('keydown', {
                 key: '>', code: 'Period', keyCode: 190, which: 190, shiftKey: true, bubbles: true
             }));
-
             attempts++;
-        }, 100);
+        }, 80);
     }
 
-    // 3. Force video quality setting
-    function applyQualitySettings() {
-        const player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
-        if (player && typeof player.setPlaybackQualityRange === 'function') {
-            player.setPlaybackQualityRange(CONFIG.TARGET_QUALITY, CONFIG.TARGET_QUALITY);
-        }
+    // 3. Stealth macro click using inline DOM styling
+    function runStealthMacro() {
+        if (window.macroActive) return;
+        window.macroActive = true;
+
+        const originalStyles = new Map();
+
+        // Bypass CSP by directly modifying inline styles
+        const hideMenu = () => {
+            const menus = document.querySelectorAll('.ytp-popup, .ytp-settings-menu, .ytp-panel');
+            menus.forEach(m => {
+                if (!originalStyles.has(m)) {
+                    originalStyles.set(m, m.style.opacity);
+                }
+                // Force opacity 0 directly on the DOM element
+                m.style.setProperty('opacity', '0', 'important');
+            });
+        };
+
+        const restoreMenu = () => {
+            originalStyles.forEach((originalOpacity, m) => {
+                if (m) m.style.opacity = originalOpacity || '';
+            });
+            originalStyles.clear();
+        };
+
+        const clickEl = (el) => {
+            if(!el) return;
+            el.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+            el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+            el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+            el.click();
+        };
+
+        let macroStep = 0;
+        let attempts = 0;
+        const targetLabel = getQualityLabel(CONFIG.TARGET_QUALITY);
+
+        // Run ultra-fast polling every 20ms
+        const macroTimer = setInterval(() => {
+            attempts++;
+            const gear = document.querySelector('.ytp-settings-button');
+            
+            // Timeout after ~2 seconds (100 * 20ms)
+            if (!gear || attempts > 100) { 
+                clearInterval(macroTimer);
+                window.macroActive = false;
+                restoreMenu();
+                return; 
+            }
+
+            // Continually hide menu to fight against React re-renders
+            hideMenu();
+
+            if (macroStep === 0) {
+                if (gear.getAttribute('aria-expanded') !== 'true') {
+                    clickEl(gear);
+                } else {
+                    macroStep = 1;
+                    attempts = 0;
+                }
+            }
+            else if (macroStep === 1) {
+                const items = Array.from(document.querySelectorAll('.ytp-menuitem'));
+                const qItem = items.find(el => el.textContent.includes('画质') || el.textContent.includes('Quality'));
+                
+                if (qItem) {
+                    const content = qItem.textContent;
+                    if (!content.includes('自动') && !content.includes('Auto')) {
+                        clickEl(gear); 
+                        clearInterval(macroTimer);
+                        window.macroActive = false;
+                        setTimeout(restoreMenu, 50);
+                    } else {
+                        clickEl(qItem);
+                        macroStep = 2;
+                        attempts = 0;
+                    }
+                }
+            }
+            else if (macroStep === 2) {
+                const subItems = Array.from(document.querySelectorAll('.ytp-menuitem'));
+                let targetOption = subItems.find(el => el.textContent.includes(targetLabel) && !el.textContent.includes('自动') && !el.textContent.includes('Auto'));
+                
+                if (!targetOption) {
+                     const nonAutos = subItems.filter(el => /\d+p/.test(el.textContent) && !el.textContent.includes('自动') && !el.textContent.includes('Auto'));
+                     if (nonAutos.length > 0) targetOption = nonAutos[0];
+                }
+
+                if (targetOption) {
+                    clickEl(targetOption);
+                    clearInterval(macroTimer);
+                    window.macroActive = false;
+                    setTimeout(restoreMenu, 50);
+                }
+            }
+        }, 20);
     }
 
-    // 4. Main video control logic
-    function processNewVideo() {
-        const player = document.getElementById('movie_player');
-        if (!player) return;
-
-        let currentVideoId = null;
-        if (typeof player.getVideoData === 'function') {
-            const data = player.getVideoData();
-            currentVideoId = data ? data.video_id : null;
-        }
-        if (!currentVideoId) {
-            currentVideoId = new URLSearchParams(window.location.search).get('v');
-        }
-
-        // Ensure speed-up triggers only once per video, retaining your right to manually slow it back down
+    // 4. Speed controller
+    function processNewVideoSpeed() {
+        const video = document.querySelector('video');
+        let currentVideoId = new URLSearchParams(window.location.search).get('v');
         if (currentVideoId && currentVideoId !== lastProcessedVideoId) {
             lastProcessedVideoId = currentVideoId;
-            syncSpeed();
-            applyQualitySettings();
+            syncSpeed(video);
         }
     }
 
-    lockQualityStorage();
+    lockSettingsStorage();
 
-    // Listen for YouTube internal route changes (SPA)
     window.addEventListener('yt-navigate-finish', () => {
-        lockQualityStorage();
-        setTimeout(processNewVideo, 800);
-        setTimeout(processNewVideo, 2000);
+        lockSettingsStorage();
+        setTimeout(processNewVideoSpeed, 300);
     });
-
-    // Listen for underlying video element loading
+    
     document.addEventListener('loadeddata', function(e) {
         if (e.target.tagName && e.target.tagName.toLowerCase() === 'video') {
-            setTimeout(processNewVideo, 500);
+            setTimeout(processNewVideoSpeed, 100);
+        }
+    }, true);
+
+    // 5. Quality controller
+    document.addEventListener('playing', function(e) {
+        if (e.target.tagName && e.target.tagName.toLowerCase() === 'video') {
+            let currentVideoId = new URLSearchParams(window.location.search).get('v');
+            if (currentVideoId && currentVideoId !== lastQualityVideoId) {
+                lastQualityVideoId = currentVideoId;
+                
+                // Wait for UI to load before running the stealth macro
+                setTimeout(runStealthMacro, 1500); 
+            }
         }
     }, true);
 
