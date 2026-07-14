@@ -144,16 +144,18 @@
             }
             else if (macroStep === 1) {
                 const items = Array.from(document.querySelectorAll('.ytp-menuitem'));
-                const qItem = items.find(el => el.textContent.includes('画质') || el.textContent.includes('Quality'));
+                const qItem = items.find(el => el.textContent.includes('画质') || el.textContent.includes('Quality') || el.textContent.includes('画質'));
                 
                 if (qItem) {
                     const content = qItem.textContent;
-                    if (!content.includes('自动') && !content.includes('Auto')) {
+                    // If current quality already contains the exact target resolution, we are good.
+                    if (content.includes(targetLabel)) {
                         clickEl(gear); 
                         clearInterval(macroTimer);
                         window.macroActive = false;
                         setTimeout(restoreMenu, 50);
                     } else {
+                        // Otherwise (whether it's Auto or another resolution like 720p), enter the submenu to change it
                         clickEl(qItem);
                         macroStep = 2;
                         attempts = 0;
@@ -162,10 +164,25 @@
             }
             else if (macroStep === 2) {
                 const subItems = Array.from(document.querySelectorAll('.ytp-menuitem'));
-                let targetOption = subItems.find(el => el.textContent.includes(targetLabel) && !el.textContent.includes('自动') && !el.textContent.includes('Auto'));
+                // Find standard target resolution, avoiding Premium options
+                let targetOption = subItems.find(el => 
+                    el.textContent.includes(targetLabel) && 
+                    !el.textContent.includes('自动') && 
+                    !el.textContent.includes('Auto') &&
+                    !el.textContent.includes('Premium') &&
+                    !el.textContent.includes('高码率') &&
+                    !el.textContent.includes('高比特率')
+                );
                 
                 if (!targetOption) {
-                     const nonAutos = subItems.filter(el => /\d+p/.test(el.textContent) && !el.textContent.includes('自动') && !el.textContent.includes('Auto'));
+                     const nonAutos = subItems.filter(el => 
+                         /\d+p/.test(el.textContent) && 
+                         !el.textContent.includes('自动') && 
+                         !el.textContent.includes('Auto') &&
+                         !el.textContent.includes('Premium') &&
+                         !el.textContent.includes('高码率') &&
+                         !el.textContent.includes('高比特率')
+                     );
                      if (nonAutos.length > 0) targetOption = nonAutos[0];
                 }
 
